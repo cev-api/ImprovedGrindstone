@@ -1,9 +1,13 @@
 package com.cevapi.improvedgrindstone;
 
+import java.lang.reflect.Method;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
 
-import org.bukkit.Bukkit;
+import org.bukkit.ChatColor;
 import org.bukkit.Material;
 import org.bukkit.Sound;
 import org.bukkit.enchantments.Enchantment;
@@ -13,15 +17,17 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.inventory.PrepareGrindstoneEvent;
-import org.bukkit.event.inventory.InventoryType.SlotType;
 import org.bukkit.inventory.GrindstoneInventory;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryView;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.EnchantmentStorageMeta;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.persistence.PersistentDataContainer;
 
 public final class GrindstoneListener implements Listener {
+    private static final Pattern NAMESPACED_ID_PATTERN = Pattern.compile("^[a-z0-9_.-]+:[a-z0-9/._-]+$");
+
     private final GrindstoneBookPlugin plugin;
 
     public GrindstoneListener(GrindstoneBookPlugin plugin) {
@@ -34,22 +40,10 @@ public final class GrindstoneListener implements Listener {
             return;
         }
 
-        GrindstoneInventory inventory = event.getInventory();
-        ItemStack input = inventory.getItem(0);
-        ItemStack bookSlot = inventory.getItem(1);
-
-        if (!isBook(bookSlot) || isEmpty(input)) {
-            return;
+        OperationContext context = resolveOperation(event.getInventory());
+        if (context != null) {
+            event.setResult(context.result());
         }
-
-        Map<Enchantment, Integer> stored = getEnchantmentsToStore(input);
-        if (stored.isEmpty()) {
-            event.setResult(null);
-            return;
-        }
-
-        ItemStack result = buildDisenchantedResult(input, stored);
-        event.setResult(result);
     }
 
     @EventHandler(ignoreCancelled = true)
@@ -60,112 +54,114 @@ public final class GrindstoneListener implements Listener {
 
         InventoryView view = event.getView();
         Inventory topInventory = view.getTopInventory();
-        if (!(topInventory instanceof GrindstoneInventory)) {
+        if (!(topInventory instanceof GrindstoneInventory inventory)) {
             return;
         }
 
-        if (handleBookSlotClick(event, (GrindstoneInventory) topInventory)) {
+        if (handleBookSlotClick(event, inventory)) {
             return;
         }
 
-        if (handleShiftClickBook(event, (GrindstoneInventory) topInventory)) {
+        if (handleShiftClickBook(event, inventory)) {
             return;
         }
 
-        if (event.getSlotType() == SlotType.RESULT) {
-            handleResultClick(event, (GrindstoneInventory) topInventory);
+        if (event.getRawSlot() != 2 || event.getClickedInventory() != inventory) {
             return;
         }
+
+        if (!(event.getWhoClicked() instanceof Player player)) {
+            return;
+        }
+
+        OperationContext context = resolveOperation(inventory);
+        if (context == null) {
+            return;
+        }
+
+        event.setCancelled(true);
+
+        int xpCost = context.xpCostLevels();
+        if (xpCost > 0 && player.getLevel() < xpCost) {
+            player.sendMessage(color("&cYou need " + xpCost + " levels to " + context.xpReason() + "."));
+            player.playSound(player.getLocation(), Sound.ENTITY_VILLAGER_NO, 0.8f, 0.9f);
+            return;
+        }
+
+        if (!moveResultToPlayer(event, player, context.result())) {
+            return;
+        }
+
+        if (xpCost > 0) {
+            player.giveExpLevels(-xpCost);
+        }
+
+        consumeOne(inventory, 0);
+        consumeOne(inventory, 1);
+        inventory.setItem(2, null);
+
+        giveItem(player, context.bonusItem());
+        player.playSound(player.getLocation(), Sound.BLOCK_GRINDSTONE_USE, 0.8f, 1f);
+        player.updateInventory();
     }
 
     @EventHandler(ignoreCancelled = true)
     public void onInventoryDrag(InventoryDragEvent event) {
         Inventory inventory = event.getInventory();
-        if (!(inventory instanceof GrindstoneInventory)) {
+        if (!(inventory instanceof GrindstoneInventory grindstone)) {
             return;
         }
 
-        if (!event.getRawSlots().contains(1)) {
-            return;
-        }
-
-        if (!plugin.isFeatureEnabled()) {
+        if (!plugin.isFeatureEnabled() || !event.getRawSlots().contains(1)) {
             return;
         }
 
         ItemStack cursor = event.getOldCursor();
-        if (!isBook(cursor)) {
-            return;
-        }
-
-        GrindstoneInventory grindstone = (GrindstoneInventory) inventory;
-        if (!isEmpty(grindstone.getItem(1))) {
+        if (!isBook(cursor) || !isEmpty(grindstone.getItem(1))) {
             return;
         }
 
         event.setCancelled(true);
-        grindstone.setItem(1, new ItemStack(Material.BOOK));
+        grindstone.setItem(1, extractOne(cursor));
         event.setCursor(removeOne(cursor));
     }
 
-    private void handleResultClick(InventoryClickEvent event, GrindstoneInventory inventory) {
-        ItemStack current = event.getCurrentItem();
-        if (isEmpty(current)) {
-            return;
+    private OperationContext resolveOperation(GrindstoneInventory inventory) {
+        ItemStack source = inventory.getItem(0);
+        ItemStack secondSlot = inventory.getItem(1);
+
+        if (isEmpty(source) || isEmpty(secondSlot)) {
+            return null;
         }
 
-        ItemStack input = inventory.getItem(0);
-        ItemStack bookSlot = inventory.getItem(1);
-        if (isEmpty(input) || !isBook(bookSlot)) {
-            return;
-        }
-
-        Map<Enchantment, Integer> enchantments = getEnchantmentsToStore(input);
+        Map<Enchantment, Integer> enchantments = getEnchantmentsToStore(source);
         if (enchantments.isEmpty()) {
-            return;
+            return null;
         }
 
-        Player player = (Player) event.getWhoClicked();
-        if (!plugin.isGrantXpWhenBook()) {
-            if (!moveResultWithoutXp(event, player, current)) {
-                return;
-            }
-
-            inventory.setItem(0, null);
-            inventory.setItem(1, null);
-            inventory.setItem(2, null);
-
-            giveEnchantedBook(player, enchantments);
-            player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1f);
-            player.updateInventory();
-            return;
+        if (isValidBookForExtraction(secondSlot)) {
+            ItemStack result = buildDisenchantedResult(source, enchantments);
+            ItemStack bonus = buildEnchantedBook(enchantments);
+            int xpCost = plugin.isBookXpCostEnabled()
+                    ? calculateXpCost(enchantments, plugin.getBookXpCostPercent())
+                    : 0;
+            return new OperationContext(result, bonus, xpCost, "extract enchantments into a book");
         }
 
-        Bukkit.getScheduler().runTask(plugin, () -> {
-            if (!plugin.isFeatureEnabled() || !player.isOnline()) {
-                return;
-            }
+        if (!plugin.isTransferEnabled() || !isTransferCandidate(source, secondSlot)) {
+            return null;
+        }
 
-            if (player.getOpenInventory().getTopInventory() != inventory) {
-                return;
-            }
-
-            ItemStack slot1 = inventory.getItem(1);
-            if (isBook(slot1)) {
-                inventory.setItem(1, null);
-            }
-
-            giveEnchantedBook(player, enchantments);
-            player.playSound(player.getLocation(), Sound.ENTITY_ITEM_PICKUP, 0.5f, 1f);
-        });
+        ItemStack result = buildTransferredItem(secondSlot, enchantments);
+        ItemStack bonus = buildDisenchantedResult(source, enchantments);
+        int xpCost = plugin.isTransferXpCostEnabled()
+                ? calculateXpCost(enchantments, plugin.getTransferXpCostPercent())
+                : 0;
+        return new OperationContext(result, bonus, xpCost, "transfer enchantments to another item");
     }
 
     private boolean handleBookSlotClick(InventoryClickEvent event, GrindstoneInventory inventory) {
-        if (event.getRawSlot() != 1) {
-            return false;
-        }
-
-        if (event.getClickedInventory() != inventory) {
+        if (event.getRawSlot() != 1 || event.getClickedInventory() != inventory) {
             return false;
         }
 
@@ -174,7 +170,7 @@ public final class GrindstoneListener implements Listener {
 
         if (isBook(cursor) && isEmpty(slotItem)) {
             event.setCancelled(true);
-            inventory.setItem(1, new ItemStack(Material.BOOK));
+            inventory.setItem(1, extractOne(cursor));
             event.setCursor(removeOne(cursor));
             return true;
         }
@@ -199,55 +195,43 @@ public final class GrindstoneListener implements Listener {
         }
 
         ItemStack current = event.getCurrentItem();
-        if (!isBook(current)) {
-            return false;
-        }
-
-        if (!isEmpty(inventory.getItem(1))) {
+        if (!isBook(current) || !isEmpty(inventory.getItem(1))) {
             return false;
         }
 
         event.setCancelled(true);
-        inventory.setItem(1, new ItemStack(Material.BOOK));
+        inventory.setItem(1, extractOne(current));
         event.getClickedInventory().setItem(event.getSlot(), removeOne(current));
         return true;
     }
 
-    private ItemStack buildEnchantedBook(Map<Enchantment, Integer> enchantments) {
-        ItemStack enchantedBook = new ItemStack(Material.ENCHANTED_BOOK);
-        EnchantmentStorageMeta meta = (EnchantmentStorageMeta) enchantedBook.getItemMeta();
-        for (Map.Entry<Enchantment, Integer> entry : enchantments.entrySet()) {
-            meta.addStoredEnchant(entry.getKey(), entry.getValue(), true);
-        }
-        enchantedBook.setItemMeta(meta);
-        return enchantedBook;
-    }
-
-    private void giveEnchantedBook(Player player, Map<Enchantment, Integer> enchantments) {
-        ItemStack enchantedBook = buildEnchantedBook(enchantments);
-        Map<Integer, ItemStack> leftovers = player.getInventory().addItem(enchantedBook);
-        for (ItemStack leftover : leftovers.values()) {
-            player.getWorld().dropItemNaturally(player.getLocation(), leftover);
-        }
-    }
-
-    private boolean moveResultWithoutXp(InventoryClickEvent event, Player player, ItemStack result) {
+    private boolean moveResultToPlayer(InventoryClickEvent event, Player player, ItemStack result) {
         if (!event.isShiftClick()) {
-            ItemStack cursor = event.getCursor();
-            if (!isEmpty(cursor)) {
+            if (event.getClick().isKeyboardClick() || !isEmpty(event.getCursor())) {
                 return false;
             }
-            event.setCancelled(true);
+
             event.setCursor(result.clone());
             return true;
         }
 
         Map<Integer, ItemStack> leftovers = player.getInventory().addItem(result.clone());
-        if (!leftovers.isEmpty()) {
-            return false;
+        return leftovers.isEmpty();
+    }
+
+    private ItemStack buildEnchantedBook(Map<Enchantment, Integer> enchantments) {
+        ItemStack enchantedBook = new ItemStack(Material.ENCHANTED_BOOK);
+        EnchantmentStorageMeta meta = (EnchantmentStorageMeta) enchantedBook.getItemMeta();
+        if (meta == null) {
+            return enchantedBook;
         }
-        event.setCancelled(true);
-        return true;
+
+        for (Map.Entry<Enchantment, Integer> entry : enchantments.entrySet()) {
+            meta.addStoredEnchant(entry.getKey(), entry.getValue(), true);
+        }
+
+        enchantedBook.setItemMeta(meta);
+        return enchantedBook;
     }
 
     private ItemStack buildDisenchantedResult(ItemStack input, Map<Enchantment, Integer> toRemove) {
@@ -263,6 +247,24 @@ public final class GrindstoneListener implements Listener {
         return result;
     }
 
+    private ItemStack buildTransferredItem(ItemStack target, Map<Enchantment, Integer> enchantments) {
+        ItemStack result = target.clone();
+        result.setAmount(1);
+
+        ItemMeta meta = result.getItemMeta();
+        if (meta == null) {
+            return result;
+        }
+
+        for (Map.Entry<Enchantment, Integer> entry : enchantments.entrySet()) {
+            int mergedLevel = Math.max(meta.getEnchantLevel(entry.getKey()), entry.getValue());
+            meta.addEnchant(entry.getKey(), mergedLevel, true);
+        }
+
+        result.setItemMeta(meta);
+        return result;
+    }
+
     private Map<Enchantment, Integer> getEnchantmentsToStore(ItemStack input) {
         Map<Enchantment, Integer> filtered = new LinkedHashMap<>();
         input.getEnchantments().forEach((ench, level) -> {
@@ -273,6 +275,250 @@ public final class GrindstoneListener implements Listener {
         return filtered;
     }
 
+    private int calculateXpCost(Map<Enchantment, Integer> enchantments, double percent) {
+        if (percent <= 0.0d) {
+            return 0;
+        }
+
+        int baseCost = estimateEnchantingTableCost(enchantments);
+        if (baseCost <= 0) {
+            return 0;
+        }
+
+        int computed = (int) Math.ceil(baseCost * (percent / 100.0d));
+        return Math.max(1, computed);
+    }
+
+    private int estimateEnchantingTableCost(Map<Enchantment, Integer> enchantments) {
+        int highest = 1;
+        for (Map.Entry<Enchantment, Integer> entry : enchantments.entrySet()) {
+            highest = Math.max(highest, estimateEnchantingTableCost(entry.getKey(), entry.getValue()));
+        }
+        // Enchanting table level cost caps at 30, so match that scale.
+        return Math.max(1, Math.min(30, highest));
+    }
+
+    private int estimateEnchantingTableCost(Enchantment enchantment, int level) {
+        Integer min = invokeIntWithArg(enchantment, "getMinModifiedCost", level);
+        Integer max = invokeIntWithArg(enchantment, "getMaxModifiedCost", level);
+
+        if (min == null) {
+            min = invokeIntWithArg(enchantment, "getMinCost", level);
+        }
+
+        if (max == null) {
+            max = invokeIntWithArg(enchantment, "getMaxCost", level);
+        }
+
+        if (min != null && max != null) {
+            return Math.max(1, (int) Math.ceil((min + max) / 2.0d));
+        }
+
+        if (min != null) {
+            return Math.max(1, min);
+        }
+
+        Integer anvilCost = invokeIntNoArg(enchantment, "getAnvilCost");
+        if (anvilCost != null) {
+            return Math.max(1, anvilCost * Math.max(1, level));
+        }
+
+        return Math.max(1, 5 + (level * 3));
+    }
+
+    private Integer invokeIntWithArg(Object target, String methodName, int arg) {
+        try {
+            Method method = target.getClass().getMethod(methodName, int.class);
+            Object result = method.invoke(target, arg);
+            if (result instanceof Number number) {
+                return number.intValue();
+            }
+        } catch (ReflectiveOperationException ignored) {
+            // API method does not exist in this server version.
+        }
+        return null;
+    }
+
+    private Integer invokeIntNoArg(Object target, String methodName) {
+        try {
+            Method method = target.getClass().getMethod(methodName);
+            Object result = method.invoke(target);
+            if (result instanceof Number number) {
+                return number.intValue();
+            }
+        } catch (ReflectiveOperationException ignored) {
+            // API method does not exist in this server version.
+        }
+        return null;
+    }
+
+    private boolean isValidBookForExtraction(ItemStack stack) {
+        if (!isBook(stack)) {
+            return false;
+        }
+
+        if (!plugin.isRequireSpecialBook()) {
+            return true;
+        }
+
+        return isSpecialBook(stack);
+    }
+
+    private boolean isSpecialBook(ItemStack stack) {
+        ItemMeta meta = stack.getItemMeta();
+        if (meta == null) {
+            return false;
+        }
+
+        Set<String> configuredIds = plugin.getSpecialBookIds();
+        String itemModel = getItemModelId(meta);
+        if (itemModel != null) {
+            if (configuredIds.isEmpty() && !itemModel.startsWith("minecraft:")) {
+                return true;
+            }
+
+            if (configuredIds.contains(itemModel)) {
+                return true;
+            }
+        }
+
+        PersistentDataContainer dataContainer = meta.getPersistentDataContainer();
+        for (org.bukkit.NamespacedKey key : dataContainer.getKeys()) {
+            String keyText = key.asString().toLowerCase(Locale.ROOT);
+            if (configuredIds.contains(keyText)) {
+                return true;
+            }
+
+            if (configuredIds.isEmpty() && !key.getNamespace().equalsIgnoreCase("minecraft")) {
+                return true;
+            }
+        }
+
+        if (meta.hasDisplayName()) {
+            String displayName = ChatColor.stripColor(meta.getDisplayName());
+            if (displayName != null) {
+                String normalized = displayName.toLowerCase(Locale.ROOT).trim();
+                if (configuredIds.contains(normalized)) {
+                    return true;
+                }
+
+                if (configuredIds.isEmpty()
+                        && NAMESPACED_ID_PATTERN.matcher(normalized).matches()
+                        && !normalized.startsWith("minecraft:")) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private String getItemModelId(ItemMeta meta) {
+        try {
+            Method hasItemModel = meta.getClass().getMethod("hasItemModel");
+            Object hasValue = hasItemModel.invoke(meta);
+            if (!(hasValue instanceof Boolean hasModel) || !hasModel) {
+                return null;
+            }
+
+            Method getItemModel = meta.getClass().getMethod("getItemModel");
+            Object value = getItemModel.invoke(meta);
+            if (value == null) {
+                return null;
+            }
+
+            return value.toString().toLowerCase(Locale.ROOT);
+        } catch (ReflectiveOperationException ignored) {
+            // API method does not exist in this server version.
+            return null;
+        }
+    }
+
+    private boolean isTransferCandidate(ItemStack source, ItemStack target) {
+        if (isBook(target)) {
+            return false;
+        }
+
+        String sourceArchetype = getArchetype(source.getType());
+        String targetArchetype = getArchetype(target.getType());
+        return sourceArchetype.equals(targetArchetype);
+    }
+
+    private String getArchetype(Material material) {
+        String name = material.name();
+
+        if (name.endsWith("_HELMET")) {
+            return "helmet";
+        }
+
+        if (name.endsWith("_CHESTPLATE")) {
+            return "chestplate";
+        }
+
+        if (name.endsWith("_LEGGINGS")) {
+            return "leggings";
+        }
+
+        if (name.endsWith("_BOOTS")) {
+            return "boots";
+        }
+
+        if (name.endsWith("_SWORD")) {
+            return "sword";
+        }
+
+        if (name.endsWith("_AXE")) {
+            return "axe";
+        }
+
+        if (name.endsWith("_PICKAXE")) {
+            return "pickaxe";
+        }
+
+        if (name.endsWith("_SHOVEL")) {
+            return "shovel";
+        }
+
+        if (name.endsWith("_HOE")) {
+            return "hoe";
+        }
+
+        if (name.endsWith("_HORSE_ARMOR")) {
+            return "horse_armor";
+        }
+
+        if (name.equals("BOW") || name.equals("CROSSBOW") || name.equals("TRIDENT") || name.equals("MACE")
+                || name.equals("ELYTRA") || name.equals("FISHING_ROD") || name.equals("SHEARS")
+                || name.equals("SHIELD")) {
+            return name.toLowerCase(Locale.ROOT);
+        }
+
+        return name;
+    }
+
+    private void giveItem(Player player, ItemStack item) {
+        Map<Integer, ItemStack> leftovers = player.getInventory().addItem(item);
+        for (ItemStack leftover : leftovers.values()) {
+            player.getWorld().dropItemNaturally(player.getLocation(), leftover);
+        }
+    }
+
+    private void consumeOne(GrindstoneInventory inventory, int slot) {
+        ItemStack stack = inventory.getItem(slot);
+        if (isEmpty(stack)) {
+            return;
+        }
+
+        if (stack.getAmount() <= 1) {
+            inventory.setItem(slot, null);
+            return;
+        }
+
+        ItemStack reduced = stack.clone();
+        reduced.setAmount(stack.getAmount() - 1);
+        inventory.setItem(slot, reduced);
+    }
+
     private boolean isBook(ItemStack stack) {
         return stack != null && stack.getType() == Material.BOOK;
     }
@@ -281,8 +527,17 @@ public final class GrindstoneListener implements Listener {
         return stack == null || stack.getType() == Material.AIR;
     }
 
+    private ItemStack extractOne(ItemStack stack) {
+        if (isEmpty(stack)) {
+            return null;
+        }
+        ItemStack one = stack.clone();
+        one.setAmount(1);
+        return one;
+    }
+
     private ItemStack removeOne(ItemStack stack) {
-        if (stack == null) {
+        if (isEmpty(stack)) {
             return null;
         }
         int amount = stack.getAmount();
@@ -292,5 +547,12 @@ public final class GrindstoneListener implements Listener {
         ItemStack remaining = stack.clone();
         remaining.setAmount(amount - 1);
         return remaining;
+    }
+
+    private String color(String message) {
+        return ChatColor.translateAlternateColorCodes('&', message);
+    }
+
+    private record OperationContext(ItemStack result, ItemStack bonusItem, int xpCostLevels, String xpReason) {
     }
 }

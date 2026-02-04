@@ -1,3 +1,9 @@
 feature-enabled: true
-capture-cursed: false
-grant-xp-when-book: false
+capture-cursed: true
+book-xp-cost-enabled: true
+book-xp-cost-percent: 50.0
+transfer-enabled: true
+transfer-xp-cost-enabled: true
+transfer-xp-cost-percent: 50.0
+require-special-book: false
+special-book-ids: []
