@@ -1,5 +1,7 @@
 package com.cevapi.improvedgrindstone;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.lang.reflect.Method;
 import java.util.LinkedHashMap;
 import java.util.Locale;
@@ -24,6 +26,7 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.EnchantmentStorageMeta;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataContainer;
+import org.bukkit.util.io.BukkitObjectOutputStream;
 
 public final class GrindstoneListener implements Listener {
     private static final Pattern NAMESPACED_ID_PATTERN = Pattern.compile("^[a-z0-9_.-]+:[a-z0-9/._-]+$");
@@ -40,7 +43,13 @@ public final class GrindstoneListener implements Listener {
             return;
         }
 
-        OperationContext context = resolveOperation(event.getInventory());
+        OperationResolution resolution = resolveOperation(event.getInventory());
+        if (resolution.blockedReason() != null) {
+            event.setResult(null);
+            return;
+        }
+
+        OperationContext context = resolution.context();
         if (context != null) {
             event.setResult(context.result());
         }
@@ -74,7 +83,15 @@ public final class GrindstoneListener implements Listener {
             return;
         }
 
-        OperationContext context = resolveOperation(inventory);
+        OperationResolution resolution = resolveOperation(inventory);
+        if (resolution.blockedReason() != null) {
+            event.setCancelled(true);
+            player.sendMessage(color("&c" + resolution.blockedReason()));
+            player.playSound(player.getLocation(), Sound.ENTITY_VILLAGER_NO, 0.8f, 0.9f);
+            return;
+        }
+
+        OperationContext context = resolution.context();
         if (context == null) {
             return;
         }
@@ -126,38 +143,51 @@ public final class GrindstoneListener implements Listener {
         event.setCursor(removeOne(cursor));
     }
 
-    private OperationContext resolveOperation(GrindstoneInventory inventory) {
+    private OperationResolution resolveOperation(GrindstoneInventory inventory) {
         ItemStack source = inventory.getItem(0);
         ItemStack secondSlot = inventory.getItem(1);
 
         if (isEmpty(source) || isEmpty(secondSlot)) {
-            return null;
+            return OperationResolution.none();
         }
 
         Map<Enchantment, Integer> enchantments = getEnchantmentsToStore(source);
         if (enchantments.isEmpty()) {
-            return null;
+            return OperationResolution.none();
         }
 
         if (isValidBookForExtraction(secondSlot)) {
             ItemStack result = buildDisenchantedResult(source, enchantments);
             ItemStack bonus = buildEnchantedBook(enchantments);
+            if (bonus == null) {
+                return OperationResolution.blocked("Those enchantments cannot be stored safely in a book.");
+            }
+
+            String validationError = validateOperation(source, result, bonus, enchantments.size());
+            if (validationError != null) {
+                return OperationResolution.blocked(validationError);
+            }
+
             int xpCost = plugin.isBookXpCostEnabled()
                     ? calculateXpCost(enchantments, plugin.getBookXpCostPercent())
                     : 0;
-            return new OperationContext(result, bonus, xpCost, "extract enchantments into a book");
+            return OperationResolution.ready(new OperationContext(result, bonus, xpCost, "extract enchantments into a book"));
         }
 
         if (!plugin.isTransferEnabled() || !isTransferCandidate(source, secondSlot)) {
-            return null;
+            return OperationResolution.none();
         }
 
         ItemStack result = buildTransferredItem(secondSlot, enchantments);
         ItemStack bonus = buildDisenchantedResult(source, enchantments);
+        String validationError = validateOperation(source, result, bonus, enchantments.size());
+        if (validationError != null) {
+            return OperationResolution.blocked(validationError);
+        }
         int xpCost = plugin.isTransferXpCostEnabled()
                 ? calculateXpCost(enchantments, plugin.getTransferXpCostPercent())
                 : 0;
-        return new OperationContext(result, bonus, xpCost, "transfer enchantments to another item");
+        return OperationResolution.ready(new OperationContext(result, bonus, xpCost, "transfer enchantments to another item"));
     }
 
     private boolean handleBookSlotClick(InventoryClickEvent event, GrindstoneInventory inventory) {
@@ -223,11 +253,14 @@ public final class GrindstoneListener implements Listener {
         ItemStack enchantedBook = new ItemStack(Material.ENCHANTED_BOOK);
         EnchantmentStorageMeta meta = (EnchantmentStorageMeta) enchantedBook.getItemMeta();
         if (meta == null) {
-            return enchantedBook;
+            return null;
         }
 
         for (Map.Entry<Enchantment, Integer> entry : enchantments.entrySet()) {
-            meta.addStoredEnchant(entry.getKey(), entry.getValue(), true);
+            boolean added = meta.addStoredEnchant(entry.getKey(), entry.getValue(), true);
+            if (!added) {
+                return null;
+            }
         }
 
         enchantedBook.setItemMeta(meta);
@@ -275,6 +308,38 @@ public final class GrindstoneListener implements Listener {
         return filtered;
     }
 
+    private String validateOperation(ItemStack source, ItemStack result, ItemStack bonus, int enchantCount) {
+        if (enchantCount > plugin.getMaxEnchantsPerOperation()) {
+            return "This item has too many enchantments (" + enchantCount + "/" + plugin.getMaxEnchantsPerOperation()
+                    + ") to process safely.";
+        }
+
+        int maxBytes = plugin.getMaxOperationItemBytes();
+        if (estimateSerializedBytes(source) > maxBytes
+                || estimateSerializedBytes(result) > maxBytes
+                || estimateSerializedBytes(bonus) > maxBytes) {
+            return "This item's NBT payload is too large to process safely in the grindstone.";
+        }
+
+        return null;
+    }
+
+    private int estimateSerializedBytes(ItemStack item) {
+        if (isEmpty(item)) {
+            return 0;
+        }
+
+        try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                BukkitObjectOutputStream out = new BukkitObjectOutputStream(baos)) {
+            out.writeObject(item);
+            out.flush();
+            return baos.size();
+        } catch (IOException ignored) {
+            // If serialization fails, treat as unsafe rather than risking item loss.
+            return Integer.MAX_VALUE;
+        }
+    }
+
     private int calculateXpCost(Map<Enchantment, Integer> enchantments, double percent) {
         if (percent <= 0.0d) {
             return 0;
@@ -299,6 +364,10 @@ public final class GrindstoneListener implements Listener {
     }
 
     private int estimateEnchantingTableCost(Enchantment enchantment, int level) {
+        if (!isVanillaEnchantment(enchantment)) {
+            return estimateCustomEquivalentCost(level);
+        }
+
         Integer min = invokeIntWithArg(enchantment, "getMinModifiedCost", level);
         Integer max = invokeIntWithArg(enchantment, "getMaxModifiedCost", level);
 
@@ -324,6 +393,44 @@ public final class GrindstoneListener implements Listener {
         }
 
         return Math.max(1, 5 + (level * 3));
+    }
+
+    private int estimateCustomEquivalentCost(int level) {
+        int safeLevel = Math.max(1, level);
+        int highest = 0;
+        int highestAtMaxVanilla = 0;
+        int highestVanillaLevel = 1;
+
+        for (Enchantment enchantment : Enchantment.values()) {
+            if (!isVanillaEnchantment(enchantment)) {
+                continue;
+            }
+
+            int maxLevel = Math.max(1, enchantment.getMaxLevel());
+            int boundedLevel = Math.min(safeLevel, maxLevel);
+            int cost = estimateEnchantingTableCost(enchantment, boundedLevel);
+            if (cost > highest) {
+                highest = cost;
+            }
+
+            int maxLevelCost = estimateEnchantingTableCost(enchantment, maxLevel);
+            if (maxLevelCost > highestAtMaxVanilla) {
+                highestAtMaxVanilla = maxLevelCost;
+                highestVanillaLevel = maxLevel;
+            }
+        }
+
+        if (highest > 0) {
+            return highest;
+        }
+
+        // Fallback path for atypical environments: keep costs increasing for very high levels.
+        int extrapolated = highestAtMaxVanilla + Math.max(0, safeLevel - highestVanillaLevel) * 6;
+        return Math.max(1, extrapolated);
+    }
+
+    private boolean isVanillaEnchantment(Enchantment enchantment) {
+        return enchantment.getKey().getNamespace().equalsIgnoreCase("minecraft");
     }
 
     private Integer invokeIntWithArg(Object target, String methodName, int arg) {
@@ -554,5 +661,19 @@ public final class GrindstoneListener implements Listener {
     }
 
     private record OperationContext(ItemStack result, ItemStack bonusItem, int xpCostLevels, String xpReason) {
+    }
+
+    private record OperationResolution(OperationContext context, String blockedReason) {
+        private static OperationResolution none() {
+            return new OperationResolution(null, null);
+        }
+
+        private static OperationResolution ready(OperationContext context) {
+            return new OperationResolution(context, null);
+        }
+
+        private static OperationResolution blocked(String blockedReason) {
+            return new OperationResolution(null, blockedReason);
+        }
     }
 }

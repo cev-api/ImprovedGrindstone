@@ -7,3 +7,5 @@ transfer-xp-cost-enabled: true
 transfer-xp-cost-percent: 50.0
 require-special-book: false
 special-book-ids: []
+max-enchants-per-operation: 16
+max-operation-item-bytes: 24576

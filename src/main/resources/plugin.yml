@@ -1,6 +1,6 @@
 name: ImprovedGrindstone
 main: com.cevapi.improvedgrindstone.GrindstoneBookPlugin
-version: 1.0.1
+version: 1.0.2
 api-version: 1.21
 description: Allows grindstone disenchantments to be stored directly into enchanted books.
 author: CevAPI

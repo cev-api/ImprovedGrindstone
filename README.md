@@ -40,10 +40,19 @@ transfer-xp-cost-enabled: true
 transfer-xp-cost-percent: 50.0
 require-special-book: false
 special-book-ids: []
+max-enchants-per-operation: 16
+max-operation-item-bytes: 24576
 ```
 
 `special-book-ids` accepts namespaced IDs (for example `dingus:blah`).  
 If `special-book-ids` is empty, any non-vanilla namespaced marker is accepted (item model, plugin PDC key, or namespaced display name).
+
+`max-enchants-per-operation` is a safety cap. If a source item has more enchantments than this value, the grindstone operation is blocked to avoid oversized/unstable enchant payload handling.
+`max-operation-item-bytes` is an additional safety cap on serialized item size (source/result/bonus). If any item involved exceeds this size, the operation is blocked to prevent unsafe payload handling.
+
+XP-cost notes:
+- Vanilla enchantments use their estimated enchanting-table costs.
+- Custom enchantments are assigned a rough vanilla-equivalent cost from their level, using the highest matching vanilla cost as the baseline.
 
 ## Compatibility
 Designed for Paper 1.21.11.

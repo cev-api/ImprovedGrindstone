@@ -21,6 +21,8 @@ public final class GrindstoneBookPlugin extends JavaPlugin {
     private static final String CONFIG_TRANSFER_XP_COST_PERCENT_KEY = "transfer-xp-cost-percent";
     private static final String CONFIG_REQUIRE_SPECIAL_BOOK_KEY = "require-special-book";
     private static final String CONFIG_SPECIAL_BOOK_IDS_KEY = "special-book-ids";
+    private static final String CONFIG_MAX_ENCHANTS_PER_OPERATION_KEY = "max-enchants-per-operation";
+    private static final String CONFIG_MAX_OPERATION_ITEM_BYTES_KEY = "max-operation-item-bytes";
 
     private boolean featureEnabled;
     private boolean captureCursed;
@@ -31,6 +33,8 @@ public final class GrindstoneBookPlugin extends JavaPlugin {
     private double transferXpCostPercent;
     private boolean requireSpecialBook;
     private Set<String> specialBookIds = new LinkedHashSet<>();
+    private int maxEnchantsPerOperation;
+    private int maxOperationItemBytes;
 
     @Override
     public void onEnable() {
@@ -74,6 +78,9 @@ public final class GrindstoneBookPlugin extends JavaPlugin {
                 .map(value -> value.toLowerCase(Locale.ROOT).trim())
                 .filter(value -> !value.isEmpty())
                 .collect(Collectors.toCollection(LinkedHashSet::new));
+        maxEnchantsPerOperation = clampPositiveInt(config.getInt(CONFIG_MAX_ENCHANTS_PER_OPERATION_KEY, 16), 1, 200, 16);
+        maxOperationItemBytes = clampPositiveInt(config.getInt(CONFIG_MAX_OPERATION_ITEM_BYTES_KEY, 24576), 1024, 262144,
+                24576);
 
         config.set(CONFIG_KEY, featureEnabled);
         config.set(CONFIG_CAPTURE_CURSED_KEY, captureCursed);
@@ -84,6 +91,8 @@ public final class GrindstoneBookPlugin extends JavaPlugin {
         config.set(CONFIG_TRANSFER_XP_COST_PERCENT_KEY, transferXpCostPercent);
         config.set(CONFIG_REQUIRE_SPECIAL_BOOK_KEY, requireSpecialBook);
         config.set(CONFIG_SPECIAL_BOOK_IDS_KEY, specialBookIds.stream().toList());
+        config.set(CONFIG_MAX_ENCHANTS_PER_OPERATION_KEY, maxEnchantsPerOperation);
+        config.set(CONFIG_MAX_OPERATION_ITEM_BYTES_KEY, maxOperationItemBytes);
         saveConfig();
     }
 
@@ -171,11 +180,26 @@ public final class GrindstoneBookPlugin extends JavaPlugin {
         return specialBookIds;
     }
 
+    public int getMaxEnchantsPerOperation() {
+        return maxEnchantsPerOperation;
+    }
+
+    public int getMaxOperationItemBytes() {
+        return maxOperationItemBytes;
+    }
+
     private double clampPercent(double percent) {
         if (Double.isNaN(percent) || Double.isInfinite(percent)) {
             return 50.0d;
         }
         return Math.max(0.0d, Math.min(100.0d, percent));
+    }
+
+    private int clampPositiveInt(int value, int min, int max, int fallback) {
+        if (value < min || value > max) {
+            return fallback;
+        }
+        return value;
     }
 
     @Override
