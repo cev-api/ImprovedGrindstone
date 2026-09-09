@@ -627,7 +627,20 @@ public final class GrindstoneListener implements Listener {
     }
 
     private boolean isBook(ItemStack stack) {
-        return stack != null && stack.getType() == Material.BOOK;
+        if (stack == null) {
+            return false;
+        }
+        if (stack.getType() == Material.BOOK) {
+            return true;
+        }
+        // Only enchanted books with no stored enchantments are blank
+        // containers. Existing enchanted books must not be overwritten.
+        if (stack.getType() != Material.ENCHANTED_BOOK) {
+            return false;
+        }
+        ItemMeta meta = stack.getItemMeta();
+        return meta instanceof EnchantmentStorageMeta storageMeta
+                && storageMeta.getStoredEnchants().isEmpty();
     }
 
     private boolean isEmpty(ItemStack stack) {

@@ -1,12 +1,13 @@
 # Improved Grindstone
 
-Lightweight Paper 1.21.11 plugin that reroutes grindstone disenchantments into books, with optional cross-material transfer support.
+Improved Grindstone is a Paper plugin that removes enchantments from an item and puts them into a book. It can also transfer enchantments between compatible items.
 
 ## Features
 - Slot 0: enchanted source item.
 - Slot 1 can be either:
-  - A normal book (optionally can be a special book) to extract enchantments into an enchanted book.
+  - A normal book or a blank enchanted book to extract enchantments into an enchanted book.
   - A compatible target item (same archetype, different material allowed) to transfer enchantments directly.
+
 - Extraction keeps the source item (disenchanted) and gives an enchanted book with removed enchants.
 - Transfer keeps the source item (disenchanted) and returns the target item with transferred enchants.
 - Optional cursed-enchantment capture toggle.
@@ -22,6 +23,12 @@ Lightweight Paper 1.21.11 plugin that reroutes grindstone disenchantments into b
   - `/improvedgrindstone transferxp`
   - `/improvedgrindstone specialbook`
   - `/improvedgrindstone reload`
+
+## Compatibility
+
+- Paper 1.21.x
+- Paper 26.1 -> 26.2
+
 
 ## Building
 ```bash
@@ -54,5 +61,3 @@ XP-cost notes:
 - Vanilla enchantments use their estimated enchanting-table costs.
 - Custom enchantments are assigned a rough vanilla-equivalent cost from their level, using the highest matching vanilla cost as the baseline.
 
-## Compatibility
-Designed for Paper 1.21.11.
